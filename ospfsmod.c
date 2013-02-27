@@ -452,8 +452,19 @@ ospfs_dir_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		 * the loop.  For now we do this all the time.
 		 *
 		 * EXERCISE: Your code here */
-		r = 1;		/* Fix me! */
-		break;		/* Fix me! */
+		
+		// f_pos-2 to account for the "." and ".."
+		// compare its location to the size of the directory
+
+		uint32_t size_bytes = dir_oi->oi_size * OSPFS_DIRENTRY_SIZE;
+		if((f_pos-2) >= size_bytes)
+		{
+			r = 1;
+			break;
+		}
+
+		//r = 1;		/* Fix me! */
+		//break;		/* Fix me! */
 
 		/* Get a pointer to the next entry (od) in the directory.
 		 * The file system interprets the contents of a
@@ -476,6 +487,37 @@ ospfs_dir_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		 */
 
 		/* EXERCISE: Your code here */
+		
+		//find the inode's location
+		od = ospfs_inode_data(dir_oi, (f_pos -2) * OSPFS_DIRENTRY_SIZE);
+		//get the inode
+		entry_oi = ospfs_inode(od->od_ino);
+
+		int file_type;
+		if(entry_oi != NULL)
+		{
+
+			if(entry_oi->oi_ftype == OSPFS_FTYPE_REG)
+			{
+				file_type = DT_REG;
+			}
+			else if (entry_oi->oi_ftype == OSPFS_FTYPE_DIR)
+			{
+				file_type = DT_DIR;
+			}
+			else if (entry_oi->oi_ftype == OSPFS_FTYPE_SYMLINK)
+			{
+				file_type = DT_LNK; 
+			} else
+			{
+				r =1;
+			}
+			
+		//execute callback function
+		ok_so_far = filldir(dirent, od->od_name, strlen(od->od_name), f_pos, od->od_ino, file_type);
+		}
+		//increment file position
+		f_pos++;
 	}
 
 	// Save the file position and return!
@@ -552,6 +594,23 @@ ospfs_unlink(struct inode *dirino, struct dentry *dentry)
 static uint32_t
 allocate_block(void)
 {
+	uint32_t os_nblocks = ospfs_super->os_nblocks;
+	
+	void* bitmap_blocks_start = ospfs_block(OSPFS_FREEMAP_BLK);
+	uint32_t current_block =0;
+
+	while(current_block < os_nblocks)
+	{
+		//if encountered a free block
+		if(bitvector_test(bitmap_blocks_start, current_block) ==1)
+		{
+			//mark the block as allocated, and return block number
+			bitvector_clear(bitmap_blocks_start, current_block);
+			return current_block;
+		}
+
+		current_block++;
+	}
 	/* EXERCISE: Your code here */
 	return 0;
 }
@@ -572,6 +631,17 @@ static void
 free_block(uint32_t blockno)
 {
 	/* EXERCISE: Your code here */
+	uint32_t os_nblocks = ospfs_super->os_nblocks;
+	uint32_t bounds = ospfs_super->os_firstinob;
+	
+	bounds += ospfs_super->os_firstinob + ospfs_super->os_ninodes/OSPFS_BLKINODES;
+
+	if(blockno > bounds)
+	{
+		void * bitmap_block = ospfs_block(OSPFS_FREEMAP_BLK + blockno/OSPFS_BLKBITSIZE);
+
+		bitvector_set(bitmap_block, blockno % OSPFS_BLKBITSIZE);
+	}
 }
 
 
@@ -607,6 +677,11 @@ free_block(uint32_t blockno)
 static int32_t
 indir2_index(uint32_t b)
 {
+	
+	if ( b >= OSPFS_NDIRECT + OSPFS_NINDIRECT)
+	{
+		return 0;
+	}
 	// Your code here.
 	return -1;
 }
@@ -626,7 +701,16 @@ indir2_index(uint32_t b)
 static int32_t
 indir_index(uint32_t b)
 {
-	// Your code here.
+	//Your code here
+	if( b >= OSPFS_NDIRECT + OSPFS_NINDRECT)
+	{
+		uint32_t blockoffset = b - ( OSPFS_NDIRECT + OSPFS_NINDRECT);
+		return blockoffset/ OSPFS_NINDIRECT;
+	}
+	else if( b>= OSPFS_NDIRECT)
+	{
+		return 0;
+	}
 	return -1;
 }
 
@@ -643,8 +727,19 @@ indir_index(uint32_t b)
 static int32_t
 direct_index(uint32_t b)
 {
-	// Your code here.
-	return -1;
+	if(b >= OSPFS_NDIRECT + OSPFS_NINDRECT)
+	{
+		uint32_t blockoffset = b - (OSPFS_NDIRECT + OSPFS_NINDRECT);
+		return blockoffset % OSPFS_NINDRECT;
+	}
+	else if ( b >= OSPFS_NDIRECT)
+	{
+		return b - OSPFS_NDIRECT;
+	}
+	else
+	{
+		return b;
+	}
 }
 
 
@@ -682,14 +777,138 @@ direct_index(uint32_t b)
 static int
 add_block(ospfs_inode_t *oi)
 {
+
+	int j;
+	uint32_t n;
+	uint32_t *block;
+	uint32_t block_no;
+
+	if(oi->oi_ftype == OSPFS_FTYPE_SYMLINK)
+		return 0;
+
+
+
+
 	// current number of blocks in file
-	uint32_t n = ospfs_size2nblocks(oi->oi_size);
+	n = ospfs_size2nblocks(oi->oi_size);
 
 	// keep track of allocations to free in case of -ENOSPC
 	uint32_t *allocated[2] = { 0, 0 };
 
-	/* EXERCISE: Your code here */
-	return -EIO; // Replace this line
+	
+	if(n >= OSPFS_NDIRECT + OSPFS_NINDRECT &&  (n-1) < OSPFS_NDIRECT + OSPFS_NINDRECT)
+	{
+		allocated[1] = allocate_block();
+		
+		if(allocated[1] == 0)
+		{
+			return -ENOSPC;
+		}
+	
+		block = ospfs_block(allocated[1]);
+		for(j =0; j < OSPFS_BLKSIZE/4; j++)
+			block[j]=0;
+	}
+
+	if(n >= OSPFS_NDIRECT && (n-1) < OSPFS_NDIRECT)
+	{
+		allocated[0] == allocate_block();
+
+		if(allocated[0] ==0)
+	        {
+			if(allocated[1] != 0)
+			{
+				free_block(allocated[1]);
+			}
+			return -ENOSPC;
+		}
+
+		block = ospfs_block(allocated[0]);
+		for(j=0; j < OSPFS_BLKSIZE/4; j++)
+			block[i] = 0;
+	}
+
+	block_no = allocate_block();
+
+	if(block_no ==0)
+	{
+		if(allocated[0] != 0)
+			free_block(allocated[0]);
+		if(allocated[1] !=0)
+			free_block(allocated[1]);
+		return -ENOSPC;
+	}
+
+	uint32_t * block = ospfs_block(block_no);
+	for(j = 0 ; j < OSPFC_BLKSIZE/4; j++)
+		block[i] = 0;
+
+	int r = 0;
+  
+	if( indir2_index(n) == 0)
+  	{
+    		//if indir2 was allocated
+    		if(allocated[1] != 0)
+      			oi->oi_indirect2 = allocated[1];
+    
+    		// indir2 is valid by now
+    		if(oi->oi_indirect2 != 0)
+    		{
+      			uint32_t *indirect2_block = ospfs_block(oi->oi_indirect2);
+      			
+                        //if the block of indirect pointers was just allocated
+      			if(allocated[0] != 0)
+        			indirect2_block[indir_index(n)] = allocated[0];
+      
+      			// The indir block must be allocated by now
+      			if(indirect2_block[indir_index(n)] != 0)
+      			{
+        			uint32_t *indirect_block = ospfs_block(indirect2_block[indir_index(n)]);
+        			// Assign in the indirect's block the newly assigned data block
+        			indirect_block[direct_index(n)] = newblock_no;
+      			}
+     		 	else
+        			r = -EIO;
+    		}
+    		else
+      			r = -EIO;
+	} 
+  	else if (n >= OSPFS_NDIRECT) {
+    		// New block is singly indirected
+		// check if indir was just allocated
+    		if(allocated[0] != 0)
+      			oi->oi_indirect = allocated[0];
+    
+   		// The indir block must be allocated by now
+    		if(oi->oi_indirect != 0)
+    		{
+      			uint32_t *indirect_block = ospfs_block(oi->oi_indirect);
+      			// In indir's block, place the newly assigned data block number
+      			indirect_block[direct_index(n)] = newblock_no;
+    		}
+    		else
+      			r = -EIO;
+  	}
+  	else
+  	{
+    		// Put the newly allocated block's number in direct array
+    		oi->oi_direct[direct_index(n)] = newblock_no;
+  	}
+  
+  	if(r != 0)
+  	{
+    		// Free blocks
+    		if(allocated[0] != 0)
+      			free_block((int)allocated[0]);
+    		if(allocated[1] != 0)
+      			free_block((int)allocated[1]);
+    		return r;   
+  	} 
+  
+  	//Resize the file
+  	oi->oi_size = (n + 1) * OSPFS_BLKSIZE;
+	return r;
+
 }
 
 
@@ -719,7 +938,6 @@ static int
 remove_block(ospfs_inode_t *oi)
 {
 	// current number of blocks in file
-	uint32_t n = ospfs_size2nblocks(oi->oi_size);
 
 	/* EXERCISE: Your code here */
 	return -EIO; // Replace this line
