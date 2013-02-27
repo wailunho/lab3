@@ -16,9 +16,9 @@ Student ID:
 Email: 
 
 # Partner 2 (if you're working in a team)
-Name: 
-Student ID: 
-Email: 
+Name: Nabil Nathani 
+Student ID: 803782632
+Email: nabilnathani@ucla.edu
 
 # Extra credit problems
 #Extra credit problem: none
